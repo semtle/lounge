@@ -95,7 +95,7 @@ in ${config.public ? "public" : "private"} mode`);
 
 	sockets.on("connect", function(socket) {
 		if (config.public) {
-			auth.call(socket);
+			auth.call(socket, {});
 		} else {
 			init(socket);
 		}
@@ -149,7 +149,7 @@ function index(req, res, next) {
 	res.render("index", data);
 }
 
-function init(socket, client) {
+function init(socket, client, generateToken) {
 	if (!client) {
 		socket.emit("auth", {success: true});
 		socket.on("auth", auth);
@@ -219,8 +219,7 @@ function init(socket, client) {
 								const obj = {};
 
 								if (success) {
-									obj.success = "Successfully updated your password, all your other sessions were logged out";
-									obj.token = client.config.token;
+									obj.success = "Successfully updated your password";
 								} else {
 									obj.error = "Failed to update your password";
 								}
@@ -252,11 +251,35 @@ function init(socket, client) {
 			}
 		);
 		socket.join(client.id);
-		socket.emit("init", {
-			active: client.lastActiveChannel,
-			networks: client.networks,
-			token: client.config.token || null
-		});
+
+		const sendInitEvent = token => {
+			socket.emit("init", {
+				active: client.lastActiveChannel,
+				networks: client.networks,
+				token: token
+			});
+		};
+
+		if (generateToken) {
+			client.generateToken(token => {
+				client.config.sessions[token] = {
+					lastUse: Date.now(),
+					ip: client.ip,
+				};
+
+				client.manager.updateUser(client.name, {
+					sesions: client.config.sessions
+				}, err => {
+					if (err) {
+						log.error("Failed to add session token for", client.name, err);
+					}
+				});
+
+				sendInitEvent(token);
+			});
+		} else {
+			sendInitEvent(null);
+		}
 	}
 }
 
@@ -275,10 +298,13 @@ function reverseDnsLookup(socket, client) {
 }
 
 function localAuth(client, user, password, callback) {
+	// If no user is found, or if the client has not provided a password,
+	// fail the authentication straight away
 	if (!client || !password) {
 		return callback(false);
 	}
 
+	// If this user has no password set, fail the authentication
 	if (!client.config.password) {
 		log.error(`User ${colors.bold(user)} with no local password set tried to sign in. (Probably a LDAP user)`);
 		return callback(false);
@@ -296,6 +322,7 @@ function localAuth(client, user, password, callback) {
 					}
 				});
 			}
+
 			callback(matching);
 		}).catch(error => {
 			log.error(`Error while checking users password. Error: ${error}`);
@@ -327,50 +354,60 @@ function ldapAuth(client, user, password, callback) {
 }
 
 function auth(data) {
-	var socket = this;
-	var client;
+	const socket = this;
+	let client;
+
+	const initClient = () => {
+		// If webirc is enabled and we do not know this users IP address,
+		// perform reverse dns lookup
+		if (Helper.config.webirc !== null && !client.config.ip) {
+			reverseDnsLookup(socket, client);
+		} else {
+			init(socket, client, data.remember === "on");
+		}
+	};
+
 	if (Helper.config.public) {
 		client = new Client(manager);
 		manager.clients.push(client);
+
 		socket.on("disconnect", function() {
 			manager.clients = _.without(manager.clients, client);
 			client.quit();
 		});
-		if (Helper.config.webirc) {
-			reverseDnsLookup(socket, client);
-		} else {
-			init(socket, client);
-		}
-	} else {
-		client = manager.findClient(data.user, data.token);
-		var signedIn = data.token && client && data.token === client.config.token;
-		var token;
 
-		if (client && (data.remember || data.token)) {
-			token = client.config.token;
-		}
+		initClient();
 
-		var authCallback = function(success) {
-			if (success) {
-				if (!client) {
-					// LDAP just created a user
-					manager.loadUser(data.user);
-					client = manager.findClient(data.user);
-				}
-				if (Helper.config.webirc !== null && !client.config.ip) {
-					reverseDnsLookup(socket, client);
-				} else {
-					init(socket, client, token);
-				}
-			} else {
-				socket.emit("auth", {success: success});
-			}
-		};
-
-		if (signedIn) {
-			authCallback(true);
-		} else {
-			authFunction(client, data.user, data.password, authCallback);
-		}
+		return;
 	}
+
+	const authCallback = success => {
+		// Authorization failed
+		if (!success) {
+			socket.emit("auth", {success: false});
+			return;
+		}
+
+		// If authorization succeeded but there is no loaded user,
+		// load it and find the user again (this happens with LDAP)
+		if (!client) {
+			manager.loadUser(data.user);
+			client = manager.findClient(data.user);
+		}
+
+		initClient();
+	};
+
+	client = manager.findClient(data.user);
+
+	// We have found an existing user and client has provided a token
+	if (client && data.token && client.config.sessions[data.token]) {
+		client.config.sessions[data.token].lastUse = Date.now();
+
+		authCallback(true);
+		return;
+	}
+
+	// Perform password checking (either local or LDAP depending on configuration)
+	authFunction(client, data.user, data.password, authCallback);
 }

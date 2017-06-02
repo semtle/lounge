@@ -81,12 +81,6 @@ function Client(manager, name, config) {
 
 	var client = this;
 
-	if (client.name && !client.config.token) {
-		client.updateToken(function(token) {
-			client.manager.updateUser(client.name, {token: token});
-		});
-	}
-
 	var delay = 0;
 	(client.config.networks || []).forEach(n => {
 		setTimeout(function() {
@@ -94,6 +88,10 @@ function Client(manager, name, config) {
 		}, delay);
 		delay += 1000;
 	});
+
+	if (typeof client.config.sessions !== "object") {
+		client.config.sessions = {};
+	}
 
 	if (client.name) {
 		log.info(`User ${colors.bold(client.name)} loaded`);
@@ -286,34 +284,29 @@ Client.prototype.connect = function(args) {
 	client.save();
 };
 
-Client.prototype.updateToken = function(callback) {
-	var client = this;
-
-	crypto.randomBytes(48, function(err, buf) {
+Client.prototype.generateToken = function(callback) {
+	crypto.randomBytes(48, (err, buf) => {
 		if (err) {
 			throw err;
 		}
 
-		callback(client.config.token = buf.toString("hex"));
+		callback(buf.toString("hex"));
 	});
 };
 
 Client.prototype.setPassword = function(hash, callback) {
 	var client = this;
 
-	client.updateToken(function(token) {
-		client.manager.updateUser(client.name, {
-			token: token,
-			password: hash
-		}, function(err) {
-			if (err) {
-				log.error("Failed to update password of", client.name, err);
-				return callback(false);
-			}
+	client.manager.updateUser(client.name, {
+		password: hash
+	}, function(err) {
+		if (err) {
+			log.error("Failed to update password of", client.name, err);
+			return callback(false);
+		}
 
-			client.config.password = hash;
-			return callback(true);
-		});
+		client.config.password = hash;
+		return callback(true);
 	});
 };
 
