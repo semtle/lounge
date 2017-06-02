@@ -250,6 +250,21 @@ function init(socket, client, generateToken) {
 				client.names(data);
 			}
 		);
+
+		socket.on("sign-out", token => {
+			delete client.config.sessions[token];
+
+			client.manager.updateUser(client.name, {
+				sessions: client.config.sessions
+			}, err => {
+				if (err) {
+					log.error("Failed to add session token for", client.name, err);
+				}
+			});
+
+			socket.emit("sign-out");
+		});
+
 		socket.join(client.id);
 
 		const sendInitEvent = token => {
@@ -268,7 +283,7 @@ function init(socket, client, generateToken) {
 				};
 
 				client.manager.updateUser(client.name, {
-					sesions: client.config.sessions
+					sessions: client.config.sessions
 				}, err => {
 					if (err) {
 						log.error("Failed to add session token for", client.name, err);
@@ -278,7 +293,7 @@ function init(socket, client, generateToken) {
 				sendInitEvent(token);
 			});
 		} else {
-			sendInitEvent(null);
+			sendInitEvent(true);
 		}
 	}
 }
